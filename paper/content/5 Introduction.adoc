@@ -1,0 +1,3 @@
+# Introduction
+
+In recent times developers of server applications have been searching and trying out new ways to better utilize their hardware and with that increase the overall performance of their applications. In the past java developers rely heavily on a thread-per-request style of running their applications. But due to java's implementation of Threads, which always get tie a java thread to a platform thread, which limits the amount of threads to the maximum that the OS can handle. To circumvent this limitation, developers
