@@ -1,3 +1,127 @@
 # Introduction
 
-In recent times developers of server applications have been searching and trying out new ways to better utilize their hardware and with that increase the overall performance of their applications. In the past java developers rely heavily on a thread-per-request style of running their applications. But due to java's implementation of Threads, which always get tie a java thread to a platform thread, which limits the amount of threads to the maximum that the OS can handle. To circumvent this limitation, developers
+In recent times developers of server applications have been searching and trying out new ways to better utilize their hardware and with that increase the overall performance of their applications. In the past java developers rely heavily on a thread-per-request style of running their applications. But due to java's implementation of Threads, which always tie a java thread to a platform thread, a limit on the amount of threads is automatically set since the OS cannot handle infinite threads. To circumvent this and other limitations, many new concurrency paradigms or frameworks have been introduced into the java ecosystem, java.util.concurrent (2004) introduced callables and futures as well as the executor service, fork / join framework (2012) provided a way of splitting a task into multiple subtasks and joining them back together, in 2014 the CompletionStage, also known as Completeable Futures, added a complex API for asynchronous programming to java which gave you a lot more control in how the task were executed and when it should throw an exception.   +
+
+Through all these different iterations of concurrent programming, one thing stayed the same. As soon as a task is put on a thread, it stays there until it is completed either successfully or exceptionally or it gets interrupted. Project Loom is the first to change that, it breaks the dependency between the task and the thread. +
+
+This paper will briefly explain what Project Loom is, the underlying concurrency problem because of which Loom was created, what the new virtual threads are as well as go over some code samples with the new Structured Concurrency Api. Please keep in mind that this feature as of the time of writing is a preview feature in the JDK and all that will be shown may have changed in some ways.
+
+<<<
+
+## Why Concurrency?
+
+There are, if you break it down, two big reasons for why we need concurrency to help us speed up processing.  +
+Those are:
+
+- Computational Concurrency, and
+- I/O  +
+
+Computational Concurrency, computation in parallel,  covers things like "I want to sort this huge array", here concurrency can help us to speed this up by dividing the large array into smaller arrays that each get sorted on a different thread. Easiest way to do this would be to just use parallelStream. It just uses the fork / join framework to divide the array into smaller tasks and then merge it back together. In this context, having more threads than cores is obsolete because it will create an overhead. This problem is accounted for within the Stream Api, parallelStream will spawn a Fork/Join Pool with exactly one thread per core. You can use Project Loom here but this use case is not the primary reason for its creation. +
+
+---
+
+Instead, let us go to I/O Concurrency. In the imageb beneath I have drawn up the times of how a general web request may work out in regard to how long each step takes
+
+image::request.png[]
+
+Preparing the request and processing it both will take around of 10ns while waiting for the response from the webserver is around 10ms We're moving in different magnitudes here. +
+
+The CPU is mostly idle in this case, 99.9% of the time it is just waiting for the response. With this problem it is exceptionally hard to use your hardware resources optimally. You would need hundreds of thousands of threads to have your cpu constantly not in idle. That is not possible since Threads are a very costly resource. One thread costs 2MB of Memory, 4000 Threads would cost 8 Gigabytes of Memory. Fair to say hundreds of thousands are not possible.
+
+<<<
+
+## Virtual Threads
+
+Virtual threads are a new feature introduced in Java 19 as part of Project Loom. They are designed to provide a more efficient and scalable alternative to traditional platform threads, which are implemented using native system calls and are managed by the operating system. Virtual threads are lightweight and do not require the overhead of native system calls, making them quicker to create and destroy. They are also more scalable as they are managed by the Java virtual machine (JVM) rather than the operating system, allowing the JVM to better optimize the use of physical threads. +
+
+They also got another special ability. Whenever a virtual thread blocks, on an I/O operation for example, the JVM automatically takes that virtual thread off of the underlying Platform Thread and puts a different Virtual Thread back on the Platform Thread. The CPU now has much less idle time and resources are better made use of. As soon as the blocking I/O Operation is over, the JVM will try to move that virtual thread back to actual execution and put it back onto a Platform Thread.
+
+### How to create Virtual Threads in Loom
+
+##### Development Enviroment Setup with IntelliJ
+First, we'll have to talk about how we are enable Project Loom. This is a preview feature and the java developers want to make sure that using preview features is a conscious decision. It is fairly simple. +
+I'll be showing you how you can do it in IntelliJ. We need to go to **Build, Execution, Deployment** -> **Compiler** -> **Java Compiler**. Here we just need to add the **--enable-preview** compiler flag.
+
+image::enable_preview.png[]
+And now, Project Loom is up and running.
+
+
+You can create Virtual Threads very similarly to normal Platform Threads +
+Platform:
+[source, java]
+include::../../src/main/java/eu/kekx/loomsciencepaper/StartVirtualThreads.java[tag=createPThread]
+
+Virtual:
+[source, java]
+include::../../src/main/java/eu/kekx/loomsciencepaper/StartVirtualThreads.java[tag=createVThread]
+
+image::result_starting_virtual.png[]
+
+As we can see, the virtual thread runs inside a Fork/JoinPool that has a Pool of PlatformThreads called worker-1,2,3,... +
+In this Pool, the submitted tasks will be executed in the oldest first fashion. +
+
+Being so exceptionally lightweight in comparision to a platform thread, it is possible to spawn millions of them depending on your machine, so let's try that!
+
+[source, java]
+include::../../src/main/java/eu/kekx/loomsciencepaper/MaxVirtualThreads.java[tag=maxThreads]
+
+This codes creates one million virtual threads that will just sleep for two seconds once they are started. My PC crashes at less than 100_000 platform threads, whereas this took my machine only 27 seconds. These one million virtual threads will have been run on less than my core count amount of platform threads, so for me less than 16 platform threads. A Virtual Thread is almost a thousand times less expensive to create than a platform thread according to Jose Paumard, a Java Developer Advocate. +
+
+The JVM, whenever you interrupt a virtual thread, will remove it from the current platform thread and once the blocking call is over, will put it back again onto a platform thread. This platform thread does not have to be the same thread but can be a different one. This is what makes virtual threads incredibly powerful for developers and the JVM. Developers do not have to think in async programming paradigms and instead can just write the normal, previously bad, blocking code they have always written. Previously there would have been losses performance, now with Project Loom and Virtual Threads there is close to  zero cost writing in this way. And the added benefit is the readability since this style is way easier to read for anyone experienced or a programmer that is starting out.
+
+So, let's now get back to our previous problem.
+
+image::request.png[]
+
+With virtual threads, there is no issue with the 10ms of waiting for the response. We do not need to offload this request to another thread during its duration, we do not need to code with async functions.
+With virtual threads, we just write this code how we would normally write it. The thread that takes care of this request will be moved off of its platform thread and just wait there until it gets a response. The CPU will not have to idle while waiting, since the Platform Thread can just do something else. So it is fair to say that Project Loom has found a very comfortable answer for developers for this problem. +
+
+There is one instance where a virtual thread gets **pinned** on a platform thread. That instance is when the virtual thread is executing native code. Due to how memory addresses are handled in C and Assembly, the JVM is not able to copy the stack to a different location while preserving the same memory addresses, leading to wrong addresses. This is why the JVM "pins" the virtual thread on a platform thread should this be done. One common case where this will happen is when the code uses the synchronized keyword. The synchronized block is written in assembly and uses addresses on the stack, which results in the JVM not being albe to copy the stack. Using Locks will solve this issue since they are completely written in java.
+
+So a few things to take with from this chapter +
+
+- A Platform Thread is a thin wrapper on a OS Thread
+- A Virtual Thread is not tied to a specific OS Thread
+- A Virtual Thread only is tied to a OS Thread while it performs calculations on th CPU, when it blocks it gets removed from the OS Thread
+- Creating a Virtual Thread is cheap
+- Blocking a Virtual Thread is cheap
+- And because of the above two, pooling them serves no point.
+
+<<<
+
+## Structured Concurrency
+
+When we talk about what Loom is trying to achieve, it is really about making asynchronous programming easier. In this chapter we will see how the new Structured Concurrency Api from Project Loom will help with that goal. We will work off of a use case.
+
+Let us say we want to drive from our location to Zagreb and you also want to know how the weather is over there. So you request both.
+
+image::servers_loom.png[]
+
+The Data is located at two separate servers. How can we code this? The first and most basic solution would be the completely synchronous and sequential code:
+
+[source,java]
+include::../../src/main/java/eu/kekx/loomsciencepaper/structuredconcurrency/RouteWeatherRequest.java[tag=baseRW]
+
+So, first the route will be fetched from the route server and after that the weather server will be called. You really do not want this since both of these requests will work in the order of milliseconds. But if you really consider this solution it has some good points, it is **very** easy to write and it is **very** easy to understand. Another thing it got going for itself is that should getRoute() fail then getWeather will not be called and no page will be build because the page would fail without the route. This is the behaviour you would want. When debugging this, the stacktrace gives you exactly what you want.
+
+image::base_stacktrace.png[]
+
+The stacktrace is exactly what you would expect, just the sequential call of methods. So this code is easy to write, easy to read, fails fast and is easily debuggable.  +
+The problem is that it does not perform well, the cpu is basically not being used since it is two times idle because it is waiting on a request. Okay how can we improve upon this with an ExecutorService.
+
+[source, java]
+include::../../src/main/java/eu/kekx/loomsciencepaper/structuredconcurrency/RouteAndWeatherExecutor.java[tag=execRW]
+
+Now it is better because both tasks will be executed in parallel and we wait on the .get() on the result from both relatively at the same time. This code performs much better, it is all asynchronous. But if getRoute() runs and fails, then getWeather() will still run, use up some network resources, some processing power after it is finished page() will fail. Even if the main thread gets interrupted, getWeather and getRoute will still run since they are both on another thread. The big advantage this code has over the previous one is its performance when everything goes right. On the other hand it will often occur that it uses unnecessary resources.
+
+Let's show how you'd do it with the CompletableFuture api
+
+[source, java]
+include::../../src/main/java/eu/kekx/loomsciencepaper/structuredconcurrency/RouteAndWeatherCompleteable.java[tag=compRW]
+
+Here we are supplying the functions to the CompletableFuture Api in an asynchronous way, once they are done we can compose the route together weather and then call the page() method and build the page. +
+
+As we can see, this code is much harder to read, you need to have knowledge how the CF Api is working. 
+
+
+

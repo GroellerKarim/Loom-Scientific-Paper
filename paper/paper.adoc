@@ -1,6 +1,4 @@
 
 = Scientific Paper
 
-include::content/1_Cover.adoc[leveloffset=+1]
-include::content/2 Abstract.adoc[leveloffset=+1]
-include::content/3 Preface.adoc[leveloffset=+1]
+include::content/5 Introduction.adoc[leveloffset=+1]
